@@ -46,7 +46,7 @@ is a deliberate boundary, not an oversight.
 
 ## Per-Layer Detail
 
-### Layer 1 -- String Encryption (Phases 1-2)
+### Layer 1 -- String Encryption (Phases 1-3)
 
 `ferrox-strings` provides RC4-based encryption; `ferrox-macros`' `enc!`
 macro is the user-facing entry point, encrypting literals at compile time
@@ -57,11 +57,18 @@ revealing literals. What it does **not** defend against: an attacker who
 sets a breakpoint on `EncryptedStr::get()` and reads the decrypted value
 out of memory at runtime -- that is Layer 3's job (anti-debug) to make
 harder, not Layer 1's. RC4 is used knowingly as a weak-but-sufficient
-cipher; see "Purpose and Legitimate Use" above. Interim caveat (removed
-once Phase 3 lands): keys are currently per-`enc!`-site random, not a
-single per-build seed, so F1.8's "two builds differ" property holds today
-but not yet as a *coordinated* per-build identity across all encrypted
-strings.
+cipher; see "Purpose and Legitimate Use" above.
+
+`ferrox-keygen` (Phase 3) independently satisfies F1.8 (same seed produces
+identical keys; random mode produces different keys per call), with an
+NF8 deterministic escape hatch via `FERROX_DETERMINISTIC`/`FERROX_SEED`.
+
+**Interim caveat (narrowed as of Phase 3, resolved at Phase 6):** `enc!`
+still generates its own independent per-`enc!`-site key rather than
+consuming `ferrox-keygen`'s `FERROX_STRING_KEY`. The two are wired
+together concretely in Phase 6's `examples/license-checker` -- that is
+deliberately where this caveat closes for real, proven end-to-end, rather
+than asserted in isolation per-crate.
 
 **Panic hygiene (F1.3)** is part of Layer 1's requirement set but is
 implemented alongside the rest of Layer 3 in Phase 4 (same crate,
