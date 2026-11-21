@@ -1,6 +1,6 @@
 ﻿# Ferrox Threat Model
 
-**Status:** Draft -- expanded per phase, finalized before v1.0 (F4.4).
+**Status:** In progress -- expanded per phase, finalized before v1.0 (F4.4).
 
 ## Purpose and Legitimate Use
 
@@ -46,16 +46,43 @@ is a deliberate boundary, not an oversight.
 
 ## Per-Layer Detail
 
-This section is expanded at the end of the phase that implements each layer,
-so the threat model stays a living document grounded in what actually
-shipped rather than what was planned:
+### Layer 1 -- String Encryption (Phases 1-2)
 
-- **Layer 1 (String Encryption + Panic Hygiene)** -- filled in after Phase 1.
-- **Layer 3 (Runtime Anti-Tamper / Anti-Debug)** -- filled in after Phase 4.
-- **Layer 2 (MIR Control-Flow Obfuscation)** -- filled in after Phase 7.
-- **Layer 4 (Bytecode Virtualization)** -- filled in after Phase 9.
-- **Red-Team Validation** -- filled in after Phase 11, with a link to
-  `docs/BENCHMARKS.md`.
+`ferrox-strings` provides RC4-based encryption; `ferrox-macros`' `enc!`
+macro is the user-facing entry point, encrypting literals at compile time
+and decrypting lazily, once, at first runtime access. What this defends
+against: a `strings <binary>` scan, or a quick look in a hex editor,
+finding plaintext license-check messages, error strings, or other
+revealing literals. What it does **not** defend against: an attacker who
+sets a breakpoint on `EncryptedStr::get()` and reads the decrypted value
+out of memory at runtime -- that is Layer 3's job (anti-debug) to make
+harder, not Layer 1's. RC4 is used knowingly as a weak-but-sufficient
+cipher; see "Purpose and Legitimate Use" above. Interim caveat (removed
+once Phase 3 lands): keys are currently per-`enc!`-site random, not a
+single per-build seed, so F1.8's "two builds differ" property holds today
+but not yet as a *coordinated* per-build identity across all encrypted
+strings.
+
+**Panic hygiene (F1.3)** is part of Layer 1's requirement set but is
+implemented alongside the rest of Layer 3 in Phase 4 (same crate,
+`ferrox-runtime`, same release-build-only posture) -- detailed here once
+that phase lands.
+
+### Layer 3 (Runtime Anti-Tamper / Anti-Debug)
+
+Filled in after Phase 4.
+
+### Layer 2 (MIR Control-Flow Obfuscation)
+
+Filled in after Phase 7.
+
+### Layer 4 (Bytecode Virtualization)
+
+Filled in after Phase 9.
+
+### Red-Team Validation
+
+Filled in after Phase 11, with a link to `docs/BENCHMARKS.md`.
 
 ## License and Legitimate-Use Statement (NF10)
 

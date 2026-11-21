@@ -1,6 +1,6 @@
 ﻿# Ferrox Architecture
 
-**Status:** Stub -- expanded as each crate lands, finalized in Phase 12.
+**Status:** In progress -- expanded as each crate lands, finalized in Phase 12.
 
 ## Overview
 
@@ -39,11 +39,37 @@ hardened binary
 
 ## Per-Crate Detail
 
-Filled in at the end of the phase that implements each crate -- kept close
-to the real shipped interfaces rather than speculative up front.
+### `ferrox-strings` (Phase 1)
 
-- `ferrox-strings` -- after Phase 1.
-- `ferrox-macros` (`enc!`) -- after Phase 2.
+Two layers: a pure, stateless RC4 cipher (`encrypt::rc4_apply` /
+`encrypt::encrypt_literal`, `decrypt::decrypt_bytes` /
+`decrypt::decrypt_to_string`) and a runtime-facing wrapper,
+`EncryptedStr`, built from a `'static` ciphertext slice and a `'static`
+key slice. `EncryptedStr::new` is `const fn`, so it can initialize a
+`static`; decryption happens lazily inside `OnceLock` on first `.get()`
+call and is cached for the process lifetime. RC4 is deliberately
+not cryptographically strong against a dedicated attacker -- the goal
+(per `THREAT_MODEL.md`) is keeping literals out of `strings <binary>`
+output, not providing secrecy.
+
+### `ferrox-macros` -- `enc!` (Phase 2)
+
+`enc!("literal")` is a `#[proc_macro]` (not macro_rules!, since it needs
+to run arbitrary host-side code -- RC4 encryption -- at macro-expansion
+time). It: (1) parses the input as a string literal, (2) generates a
+random 32-byte key via `rand::thread_rng()` *on the host, at compile
+time*, (3) encrypts the literal with `ferrox_strings::encrypt::encrypt_literal`,
+(4) emits both the ciphertext and key as `static` byte-array literals,
+wrapped in a `static ferrox_strings::EncryptedStr`, whose `.get()` is
+the macro's final expression. Because expansion emits an absolute path
+(`::ferrox_strings::EncryptedStr`), any crate using `enc!` must depend
+on `ferrox-strings` directly. Interim limitation, by design: each
+`enc!` site currently gets its own independently-random key, not a
+shared per-build seed -- Phase 3's `ferrox-keygen` changes *where the
+key bytes come from*, not the macro's expansion shape.
+
+## Deferred Per-Crate Detail
+
 - `ferrox-keygen` -- after Phase 3.
 - `ferrox-runtime` -- after Phase 4.
 - `ferrox-cli` -- after Phase 5.
