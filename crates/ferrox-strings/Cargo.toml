@@ -1,0 +1,11 @@
+﻿[package]
+name = "ferrox-strings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox Layer 1: compile-time string encryption with lazy runtime decryption."
+
+[lib]
+name = "ferrox_strings"

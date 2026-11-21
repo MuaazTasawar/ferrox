@@ -1,0 +1,8 @@
+﻿[package]
+name = "ferrox-mir-pass"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox Layer 2: MIR-level control-flow obfuscation via rustc_driver. Stub: implemented in Phase 7."

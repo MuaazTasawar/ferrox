@@ -1,0 +1,11 @@
+﻿[package]
+name = "license-checker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Demo app used to validate Ferrox end-to-end. Stub: implemented in Phase 6."
+
+[[bin]]
+name = "license-checker"
+path = "src/main.rs"

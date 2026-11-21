@@ -1,0 +1,11 @@
+﻿[package]
+name = "ferrox-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox Layer 3: runtime anti-tamper and anti-debug. Stub: implemented in Phase 4."
+
+[dependencies]
+libc.workspace = true

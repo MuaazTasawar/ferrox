@@ -1,0 +1,16 @@
+﻿[package]
+name = "ferrox-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox proc-macros: enc!, #[ferrox::protect], #[ferrox::vm]."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true

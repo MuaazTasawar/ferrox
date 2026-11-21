@@ -1,0 +1,12 @@
+﻿[package]
+name = "ferrox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox CLI -- cargo subcommand orchestrating the hardening pipeline. Stub: implemented in Phase 5."
+
+[[bin]]
+name = "cargo-ferrox"
+path = "src/main.rs"

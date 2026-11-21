@@ -1,0 +1,11 @@
+﻿[package]
+name = "ferrox-keygen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox per-build key randomization (build.rs helper). Stub: implemented in Phase 3."
+
+[dependencies]
+rand.workspace = true

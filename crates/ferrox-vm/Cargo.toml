@@ -1,0 +1,8 @@
+﻿[package]
+name = "ferrox-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ferrox Layer 4: stack-based bytecode ISA and interpreter. Stub: implemented in Phase 9."
