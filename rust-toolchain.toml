@@ -1,0 +1,10 @@
+﻿[toolchain]
+# Pinned nightly, required for ferrox-mir-pass (rustc_driver / rustc_middle /
+# rustc_interface are nightly-only, unstable APIs). CI fails fast (see
+# .github/workflows/ci.yml) if this exact toolchain is unavailable rather than
+# silently falling back to a different nightly (NF1, F2.6).
+#
+# TODO: pin to a concrete, tested date once Phase 7 (ferrox-mir-pass) has been
+# validated against it. Placeholder below is a recent nightly as of project start.
+channel = "nightly-2026-09-01"
+components = ["rustc-dev", "llvm-tools-preview", "rust-src", "clippy", "rustfmt"]

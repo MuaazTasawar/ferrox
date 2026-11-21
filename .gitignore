@@ -1,0 +1,31 @@
+﻿# Rust
+/target/
+**/target/
+Cargo.lock
+
+# Keep Cargo.lock for the CLI binary and examples (reproducible builds),
+# but ignore it for library crates. Simplify for v1: ignore everywhere,
+# revisit once ferrox-cli is a published binary.
+
+# Build artifacts from ferrox's own pipeline
+*.ferrox-out
+ferrox-build/
+
+# Keygen output (per-build generated, never committed)
+**/keys.rs
+
+# Red-team harness scratch output
+crates/ferrox-redteam/scratch/
+*.ghidra_project/
+*.gpr
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.local

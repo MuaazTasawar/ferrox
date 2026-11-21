@@ -1,0 +1,83 @@
+﻿name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stable-build:
+    name: Build & Test (stable, non-nightly crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --exclude ferrox-mir-pass -- -D warnings
+
+      - name: Build (excluding nightly-only MIR pass crate)
+        run: cargo build --workspace --exclude ferrox-mir-pass --verbose
+
+      - name: Test (excluding nightly-only MIR pass crate)
+        run: cargo test --workspace --exclude ferrox-mir-pass --verbose
+
+  nightly-mir-pass:
+    name: Build & Test (pinned nightly, ferrox-mir-pass)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          CHANNEL=$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustc-dev, llvm-tools-preview, rust-src, clippy, rustfmt
+
+      - name: Verify pinned toolchain resolved (fail fast, F2.6)
+        run: |
+          rustc --version
+          if ! rustc --version | grep -q "nightly"; then
+            echo "::error::Pinned nightly toolchain did not resolve correctly."
+            exit 1
+          fi
+
+      - name: Build ferrox-mir-pass
+        run: cargo build -p ferrox-mir-pass --verbose
+
+      - name: Test ferrox-mir-pass
+        run: cargo test -p ferrox-mir-pass --verbose
+
+  integration:
+    name: Integration -- license-checker example
+    runs-on: ubuntu-latest
+    needs: [stable-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build license-checker example
+        run: cargo build -p license-checker --release --verbose
+
+      # TODO (Phase 1): once ferrox-strings lands, run:
+      #   strings target/release/license-checker | grep -F "<known-sensitive-literal>"
+      # and fail the build if it matches (F1.2 / NF7).
