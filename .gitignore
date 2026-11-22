@@ -14,6 +14,15 @@ ferrox-build/
 # Keygen output (per-build generated, never committed)
 **/keys.rs
 
+# ferrox-mir-pass manual smoke-test scratch directory (Phase 7, step 7f-i):
+# flatten_test.rs itself IS tracked (useful smoke-test source), but
+# compiled artifacts from running ferrox-mir-driver.exe against it
+# (flatten_test.exe, .pdb, and anything else generated there) are not.
+scratch/*.exe
+scratch/*.pdb
+scratch/*.obj
+scratch/*.pdb.lock
+
 # Red-team harness scratch output
 crates/ferrox-redteam/scratch/
 *.ghidra_project/
