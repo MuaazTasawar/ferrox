@@ -1,23 +1,24 @@
 ﻿//! Control-flow flattening (Layer 2's core transformation).
 //!
-//! **Step 7b-ii-A (this version):** flattens `Goto` edges only. For every
-//! original basic block whose terminator is `Goto { target }` where
-//! `target` is one of the function's original blocks, this appends a
-//! `state = <target's index>` statement to the block and retargets its
-//! `Goto` at a new dispatch block, which `SwitchInt`s on `state` back out
-//! to the real target. `SwitchInt`, `Call`, `Drop`, `Assert`, and all
-//! other terminator kinds are left completely untouched in this step --
-//! deferred to step 7b-ii-B (`SwitchInt`) and documented as an ongoing
-//! scope limitation for the rest.
+//! **Step 7b-ii-A + 7b-ii-B (this version):** flattens both `Goto` edges
+//! and `SwitchInt` terminators whose targets are original blocks.
+//! - `Goto { target }`: the state-setting statement is appended directly
+//!   to the source block (no extra block needed), which then jumps to the
+//!   shared dispatch block instead of `target` directly.
+//! - `SwitchInt { discr, targets }`: cannot hold its own statements, so
+//!   each distinct original-block target referenced by any arm (or
+//!   `otherwise`) gets a deduplicated "landing pad" block (`state =
+//!   target; goto dispatch`), and the switch's arms are rewritten to
+//!   point at the landing pad instead of the real target. The
+//!   discriminant computation itself (`discr`) is left untouched -- this
+//!   step obscures the block *graph*, not which arm's condition is true;
+//!   obscuring the condition itself is opaque predicates' job (step 7c).
 //!
-//! API corrections against this nightly's real MIR types (see compiler
-//! errors in chat history): `Rvalue::Use` now takes a second `WithRetag`
-//! argument (`WithRetag::No` here -- this synthetic assignment needs no
-//! Stacked-Borrows retag); `Statement` is `#[non_exhaustive]`, built via
-//! `Statement::new(source_info, kind)` rather than a struct literal;
-//! `Terminator` gained an `attributes` field (`Default::default()` here);
-//! `BasicBlockData::new` takes an added `is_cleanup: bool` parameter
-//! (`false` for both new blocks here -- neither is a cleanup/unwind block).
+//! `Call`, `Drop`, `Assert`, `Return`, and unwind targets are still left
+//! completely untouched -- an ongoing, documented scope limitation, not
+//! addressed by this step.
+
+use std::collections::BTreeMap;
 
 use rustc_middle::mir::{
     BasicBlock, BasicBlockData, Body, Const, ConstOperand, LocalDecl, Operand, Place, Rvalue,
@@ -45,9 +46,11 @@ fn make_set_state_stmt<'tcx>(
     )
 }
 
-/// Builds a terminator-only basic block (no statements), not a cleanup block.
-fn make_terminator_only_block<'tcx>(
+/// Builds a basic block with the given statements and terminator kind, not
+/// a cleanup/unwind block.
+fn make_block<'tcx>(
     span: rustc_span::Span,
+    statements: Vec<Statement<'tcx>>,
     kind: TerminatorKind<'tcx>,
 ) -> BasicBlockData<'tcx> {
     let terminator = Terminator {
@@ -55,14 +58,17 @@ fn make_terminator_only_block<'tcx>(
         kind,
         attributes: Default::default(),
     };
-    BasicBlockData::new(Some(terminator), false)
+    let mut data = BasicBlockData::new(Some(terminator), false);
+    data.statements = statements;
+    data
 }
 
-/// Step 7b-ii-A: flattens `Goto` edges in `body`, in place.
+/// Step 7b-ii-A + 7b-ii-B: flattens `Goto` edges and `SwitchInt`
+/// terminators in `body`, in place.
 pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let debug = std::env::var("FERROX_MIR_DEBUG").as_deref() == Ok("1");
-
     let num_original_blocks = body.basic_blocks.len();
+
     if num_original_blocks <= 1 {
         if debug {
             eprintln!(
@@ -75,25 +81,65 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     }
 
     let span = body.span;
+
+    // Pass 1 (read-only): find every distinct original-block target
+    // referenced by any SwitchInt arm or otherwise, across all original
+    // blocks. Each one needs exactly one landing pad, deduplicated.
+    let mut switch_targets_needing_pads: Vec<BasicBlock> = Vec::new();
+    let mut switch_terminators_touched = 0u32;
+    for i in 0..num_original_blocks {
+        let bb = BasicBlock::from_usize(i);
+        if let TerminatorKind::SwitchInt { targets, .. } = &body.basic_blocks[bb].terminator().kind {
+            let mut touches_any = false;
+            for (_, target) in targets.iter() {
+                if target.as_usize() < num_original_blocks
+                    && !switch_targets_needing_pads.contains(&target)
+                {
+                    switch_targets_needing_pads.push(target);
+                    touches_any = true;
+                } else if target.as_usize() < num_original_blocks {
+                    touches_any = true;
+                }
+            }
+            let otherwise = targets.otherwise();
+            if otherwise.as_usize() < num_original_blocks {
+                if !switch_targets_needing_pads.contains(&otherwise) {
+                    switch_targets_needing_pads.push(otherwise);
+                }
+                touches_any = true;
+            }
+            if touches_any {
+                switch_terminators_touched += 1;
+            }
+        }
+    }
+    // Sorted, stable order so the index math below is deterministic.
+    switch_targets_needing_pads.sort_by_key(|bb| bb.as_usize());
+
+    let landing_pad_count = switch_targets_needing_pads.len();
+    // Layout: [original blocks] [landing pads] [unreachable] [dispatch]
+    let landing_pad_base = num_original_blocks;
+    let unreachable_bb = BasicBlock::from_usize(landing_pad_base + landing_pad_count);
+    let dispatch_bb = BasicBlock::from_usize(landing_pad_base + landing_pad_count + 1);
+
+    let landing_pad_for: BTreeMap<BasicBlock, BasicBlock> = switch_targets_needing_pads
+        .iter()
+        .enumerate()
+        .map(|(offset, &target)| (target, BasicBlock::from_usize(landing_pad_base + offset)))
+        .collect();
+
     let state_local = body.local_decls.push(LocalDecl::new(tcx.types.usize, span));
     let state_place = Place::from(state_local);
 
-    // The dispatch block will be pushed as the *second* new block below
-    // (after the unreachable block), so its index is
-    // `num_original_blocks + 1`. We compute it up front so the Goto
-    // retargeting loop below can reference it before it exists.
-    let dispatch_bb = BasicBlock::from_usize(num_original_blocks + 1);
-
+    // Pass 2: flatten Goto edges (unchanged approach from step 7b-ii-A,
+    // now targeting the recomputed dispatch_bb).
     let mut goto_edges_flattened = 0u32;
-
     for i in 0..num_original_blocks {
         let bb = BasicBlock::from_usize(i);
         let terminator_kind = body.basic_blocks[bb].terminator().kind.clone();
-
         if let TerminatorKind::Goto { target } = terminator_kind {
             if target.as_usize() < num_original_blocks {
-                let target_idx = target.as_u32();
-                let set_stmt = make_set_state_stmt(tcx, span, state_place, target_idx);
+                let set_stmt = make_set_state_stmt(tcx, span, state_place, target.as_u32());
                 let data = &mut body.basic_blocks_mut()[bb];
                 data.statements.push(set_stmt);
                 data.terminator_mut().kind = TerminatorKind::Goto { target: dispatch_bb };
@@ -102,36 +148,73 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         }
     }
 
-    // Unreachable fallback block (index num_original_blocks).
-    let unreachable_bb = body
-        .basic_blocks_mut()
-        .push(make_terminator_only_block(span, TerminatorKind::Unreachable));
+    // Pass 3: rewrite SwitchInt terminators to point at landing pads
+    // instead of real targets directly.
+    for i in 0..num_original_blocks {
+        let bb = BasicBlock::from_usize(i);
+        let terminator_kind = body.basic_blocks[bb].terminator().kind.clone();
+        if let TerminatorKind::SwitchInt { discr, targets } = terminator_kind {
+            let new_arms: Vec<(u128, BasicBlock)> = targets
+                .iter()
+                .map(|(value, target)| {
+                    let new_target = landing_pad_for.get(&target).copied().unwrap_or(target);
+                    (value, new_target)
+                })
+                .collect();
+            let old_otherwise = targets.otherwise();
+            let new_otherwise = landing_pad_for.get(&old_otherwise).copied().unwrap_or(old_otherwise);
 
-    // Dispatch block (index num_original_blocks + 1, matching dispatch_bb above).
+            let new_targets = SwitchTargets::new(new_arms.into_iter(), new_otherwise);
+            body.basic_blocks_mut()[bb].terminator_mut().kind = TerminatorKind::SwitchInt {
+                discr,
+                targets: new_targets,
+            };
+        }
+    }
+
+    // Pass 4: materialize landing pad blocks, in the same sorted order
+    // used to compute their indices above.
+    for &target in &switch_targets_needing_pads {
+        let set_stmt = make_set_state_stmt(tcx, span, state_place, target.as_u32());
+        let pushed = body
+            .basic_blocks_mut()
+            .push(make_block(span, vec![set_stmt], TerminatorKind::Goto { target: dispatch_bb }));
+        debug_assert_eq!(
+            pushed,
+            landing_pad_for[&target],
+            "ferrox-mir-pass: landing pad index drifted from its reserved slot"
+        );
+    }
+
+    // Pass 5: unreachable fallback + dispatch block.
+    let pushed_unreachable = body
+        .basic_blocks_mut()
+        .push(make_block(span, vec![], TerminatorKind::Unreachable));
+    debug_assert_eq!(pushed_unreachable, unreachable_bb);
+
     let mut dispatch_arms: Vec<(u128, BasicBlock)> = Vec::with_capacity(num_original_blocks);
     for i in 0..num_original_blocks {
         dispatch_arms.push((i as u128, BasicBlock::from_usize(i)));
     }
     let dispatch_targets = SwitchTargets::new(dispatch_arms.into_iter(), unreachable_bb);
-    let actual_dispatch_bb = body.basic_blocks_mut().push(make_terminator_only_block(
+    let pushed_dispatch = body.basic_blocks_mut().push(make_block(
         span,
+        vec![],
         TerminatorKind::SwitchInt {
             discr: Operand::Copy(state_place),
             targets: dispatch_targets,
         },
     ));
-
-    debug_assert_eq!(
-        actual_dispatch_bb, dispatch_bb,
-        "ferrox-mir-pass: dispatch block index drifted from its reserved slot"
-    );
+    debug_assert_eq!(pushed_dispatch, dispatch_bb);
 
     if debug {
         eprintln!(
-            "ferrox-mir-pass: flattened {:?} -- {} original block(s), {} Goto edge(s) flattened (step 7b-ii-A: Goto only)",
+            "ferrox-mir-pass: flattened {:?} -- {} original block(s), {} Goto edge(s), {} SwitchInt terminator(s) touched, {} landing pad(s) created (step 7b-ii-A+B)",
             tcx.def_path_str(body.source.def_id()),
             num_original_blocks,
-            goto_edges_flattened
+            goto_edges_flattened,
+            switch_terminators_touched,
+            landing_pad_count
         );
     }
 }
