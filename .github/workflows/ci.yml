@@ -78,6 +78,30 @@ jobs:
       - name: Build license-checker example
         run: cargo build -p license-checker --release --verbose
 
-      # TODO (Phase 1): once ferrox-strings lands, run:
-      #   strings target/release/license-checker | grep -F "<known-sensitive-literal>"
-      # and fail the build if it matches (F1.2 / NF7).
+      - name: Functional check -- correct key is accepted
+        run: |
+          OUTPUT=$(./target/release/license-checker "FERROX-DEMO-1234-5678")
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "License valid"
+
+      - name: Functional check -- wrong key is rejected
+        run: |
+          OUTPUT=$(./target/release/license-checker "wrong-key")
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "Invalid license key"
+
+      - name: F1.2 -- encrypted literals must not appear in `strings` output
+        run: |
+          if strings target/release/license-checker | grep -F "FERROX-DEMO-1234-5678"; then
+            echo "::error::Plaintext license key found via strings -- Layer 1 encryption is not working."
+            exit 1
+          fi
+          if strings target/release/license-checker | grep -F "License valid -- thank you"; then
+            echo "::error::Plaintext success message found via strings -- Layer 1 encryption is not working."
+            exit 1
+          fi
+          if strings target/release/license-checker | grep -F "Invalid license key."; then
+            echo "::error::Plaintext rejection message found via strings -- Layer 1 encryption is not working."
+            exit 1
+          fi
+          echo "F1.2 check passed: no enc!()-protected literal found in strings output."

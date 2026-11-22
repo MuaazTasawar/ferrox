@@ -4,8 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Demo app used to validate Ferrox end-to-end. Stub: implemented in Phase 6."
+description = "Demo app validating Ferrox end-to-end: enc!, per-build keygen, runtime anti-tamper/anti-debug."
 
 [[bin]]
 name = "license-checker"
 path = "src/main.rs"
+
+[dependencies]
+ferrox-macros = { path = "../../crates/ferrox-macros" }
+ferrox-strings = { path = "../../crates/ferrox-strings" }
+ferrox-runtime = { path = "../../crates/ferrox-runtime" }
+
+[build-dependencies]
+ferrox-keygen = { path = "../../crates/ferrox-keygen" }

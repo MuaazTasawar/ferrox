@@ -46,47 +46,51 @@ is a deliberate boundary, not an oversight.
 
 ## Per-Layer Detail
 
-### Layer 1 -- String Encryption (Phases 1-3)
+### Layer 1 -- String Encryption (Phases 1-3, 6)
 
 `ferrox-strings` provides RC4-based encryption; `ferrox-macros`' `enc!`
-macro is the user-facing entry point. Defends against `strings <binary>`
-scans and casual hex-editor inspection; does **not** defend against a
-breakpoint on `EncryptedStr::get()` reading decrypted memory at runtime --
-that is Layer 3's job. **Interim caveat** (resolved at Phase 6): `enc!`
-still generates its own independent per-site key rather than consuming
-`ferrox-keygen`'s output.
+macro is the user-facing entry point, encrypting literals at compile time
+and decrypting lazily, once, at first runtime access. Defends against
+`strings <binary>` scans and casual hex-editor inspection; does **not**
+defend against a breakpoint on `EncryptedStr::get()` reading decrypted
+memory at runtime -- that is Layer 3's job.
 
-### Layer 3 -- Runtime Anti-Tamper / Anti-Debug (Phase 4)
+**F1.8 caveat: closed as of Phase 6.** `ferrox-keygen`'s `run()` now emits
+`cargo:rustc-env=FERROX_STRING_KEY_HEX=<hex>` in addition to `keys.rs`;
+`enc!` reads that env var at macro-expansion time and, when present and
+valid, uses it as a single key shared by every `enc!` call site in that
+build -- rather than each site generating its own independent key. This
+is exercised concretely by `examples/license-checker`, whose three
+`enc!()` calls (license key, success message, rejection message) all
+share one per-build key, and is verified in CI (`.github/workflows/ci.yml`'s
+F1.2 `strings` check) rather than only asserted in isolated crate tests.
+**Documented fallback, not silent:** a crate using `enc!` without wiring
+in `ferrox-keygen` still works, but falls back to the Phase 2
+independent-per-site-key behavior.
 
-Panic hygiene (silent release-mode panic hook), a self-checksum background
-thread, and three independent anti-debug checks (`ptrace` self-trace on
-Linux, `IsDebuggerPresent` on Windows, timing-anomaly on both), all
-reporting into one shared `tamper_detected()` flag.
+### Layer 3 -- Runtime Anti-Tamper / Anti-Debug (Phase 4, exercised in Phase 6)
 
-**Known limitation, now tracked across two phases:**
-The checksum baseline is **trust-on-first-run**, not a true
-build-time-embedded hash. A production-grade implementation computes the
-hash *after* final linking and patches it into the binary post-build
-(the hash of a section can't be known until the bytes exist, post-link).
-That patching step requires parsing the compiled binary's format (ELF on
-Linux, PE on Windows) to locate a placeholder -- which means a new
-dependency (e.g. the `object` crate) not yet in this workspace.
+Panic hygiene, a self-checksum background thread (trust-on-first-run --
+see the known limitation below, unchanged since Phase 4/5), and three
+independent anti-debug checks, all reporting into one shared
+`tamper_detected()` flag.
 
-- As of **Phase 4**: trust-on-first-run shipped as the interim; this gap
-  was first stated here.
-- As of **Phase 5**: `ferrox-cli`'s `build` command was the natural place
-  for this post-link step to live (it already orchestrates the build), but
-  it does **not** implement it -- `commands/build.rs` states this
-  explicitly in both its module docs and its own `eprintln!` output after
-  a successful build, so a user running `cargo ferrox build` is told, not
-  left to assume more than what shipped.
-- **Practical effect, stated plainly:** Ferrox v1, as built through
-  Phase 5, defeats a debugger attaching mid-run and patching a check in
-  place; it does **not** defeat an attacker who statically patches the
-  binary before it is ever executed (the baseline would simply reflect the
-  already-patched bytes). Closing this gap is not currently scheduled
-  into Phases 6-12's file list and would need an explicit scope addition
-  if required for v1.
+`examples/license-checker` is the first concrete demonstration of F1.5
+and F1.7 as actually *used*, not just provided: `ferrox-runtime` itself
+never corrupts anything (it has no notion of what "the program's output"
+means for an arbitrary crate) -- `license-checker`'s `main()` is the call
+site that checks `tamper_detected()` immediately before printing its
+verdict and flips a valid license to invalid if tampering was found, with
+no message naming tampering ever printed (F1.5). Its three anti-debug
+checks are called from three different points in `main` -- at startup,
+after reading input, and immediately around the security-relevant
+decision -- rather than funneled through one aggregator (F1.7).
+
+**Known limitation, unchanged:** the checksum baseline is still
+trust-on-first-run, not a true build-time-embedded hash requiring
+post-link binary patching (tracked since Phase 4, restated in Phase 5 --
+not addressed by this phase, which focused on Layer 1/3 *usage*, not new
+Layer 3 capability).
 
 ### Layer 2 (MIR Control-Flow Obfuscation)
 

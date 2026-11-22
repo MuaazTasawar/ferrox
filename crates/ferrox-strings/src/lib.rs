@@ -74,3 +74,4 @@ mod tests {
         assert_eq!(es.get(), "hello from ferrox");
     }
 }
+

@@ -1,6 +1,17 @@
 ﻿//! `ferrox-keygen` -- generates per-build random key material and emits it
-//! as a `keys.rs` source file, intended to be called from a protected
-//! crate's `build.rs` (F1.8).
+//! two ways, intended to be called from a protected crate's `build.rs`
+//! (F1.8):
+//!
+//! 1. As `keys.rs` written into `OUT_DIR`, for the consuming crate's own
+//!    code to `include!()` directly.
+//! 2. As `cargo:rustc-env=FERROX_STRING_KEY_HEX=<hex>` (Phase 6), which
+//!    cargo turns into a real process environment variable for the
+//!    `rustc` invocation that compiles the consuming crate -- readable by
+//!    any proc-macro expanding during that same compilation via plain
+//!    `std::env::var`. This is how `ferrox-macros`' `enc!` (Phase 2)
+//!    picks up a single, coordinated per-build key instead of generating
+//!    its own independent key per call site -- see `enc_macro.rs` for the
+//!    consuming side of this convention.
 //!
 //! ## Usage from a consuming crate's `build.rs`
 //! ```ignore
@@ -8,19 +19,16 @@
 //!     ferrox_keygen::run().expect("ferrox-keygen: failed to generate keys.rs");
 //! }
 //! ```
-//! This writes `keys.rs` into `OUT_DIR`, which the consuming crate then
-//! pulls in with `include!(concat!(env!("OUT_DIR"), "/keys.rs"));`. Wired
-//! concretely in `examples/license-checker` (Phase 6).
+//! Wired concretely in `examples/license-checker` (Phase 6).
 //!
 //! ## Determinism (NF8)
 //! Two builds from identical source must normally produce different
 //! constants (F1.8) -- that's the whole point. But NF8 requires a
 //! `--deterministic` escape hatch for diagnosing bugs in the pipeline
-//! itself, where varying keys between runs would make a bug
-//! impossible to reproduce. Until `ferrox-cli` (Phase 5) exposes this as a
-//! proper `--deterministic` CLI flag, set the `FERROX_DETERMINISTIC=1`
-//! environment variable directly; optionally pair it with `FERROX_SEED=<u64>`
-//! to pick a specific fixed seed rather than the built-in default of `0`.
+//! itself. As of Phase 5, `cargo ferrox build --deterministic [--seed <u64>]`
+//! sets this for real by setting `FERROX_DETERMINISTIC`/`FERROX_SEED` on
+//! the child `cargo build` process; invoking `cargo build` directly still
+//! works too, via the same env vars set by hand.
 
 use std::env;
 use std::fmt::Write as _;
@@ -29,29 +37,25 @@ use std::path::Path;
 
 use rand::RngCore;
 
-/// All per-build key material `ferrox-keygen` produces. Field set is
-/// deliberately small and will grow as later phases need more derived
-/// constants -- adding a field here is not a breaking change for existing
-/// `keys.rs` consumers as long as `write_keys_rs` keeps emitting it.
+/// All per-build key material `ferrox-keygen` produces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FerroxKeys {
     /// The raw per-build seed. Not used directly for crypto -- exists so
     /// other tools (e.g. `ferrox-redteam`, Phase 11) can log/correlate
     /// which seed produced a given build without re-deriving it.
     pub seed: u64,
-    /// 32-byte key for Layer 1 string encryption (consumed by
-    /// `ferrox-macros`' `enc!` once wired in Phase 6 -- see module docs).
+    /// 32-byte key for Layer 1 string encryption, now the shared key for
+    /// every `enc!` call site in a build that wires this crate in (see
+    /// module docs) -- not just a `keys.rs` constant.
     pub string_key: [u8; 32],
-    /// 8-byte salt mixed into Layer 3's runtime checksum (consumed by
-    /// `ferrox-runtime` once wired in Phase 4).
+    /// 8-byte salt intended for Layer 3's runtime checksum. **Not yet
+    /// consumed by `ferrox-runtime`** -- generated and exposed via
+    /// `keys.rs` for forward compatibility, but `ferrox-runtime`'s
+    /// checksum thread (Phase 4) does not currently accept an external
+    /// salt parameter. Stated here rather than silently implied as wired.
     pub checksum_salt: u64,
 }
 
-/// Deterministically derives all key material from a single `u64` seed,
-/// using a seeded, non-cryptographic PRNG (`rand::rngs::StdRng` seeded via
-/// `SeedableRng`). Deterministic derivation from the seed is what makes
-/// `FERROX_DETERMINISTIC` + a fixed `FERROX_SEED` reproducible (NF8): same
-/// seed in, byte-for-byte identical `FerroxKeys` out.
 fn derive_from_seed(seed: u64) -> FerroxKeys {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -69,9 +73,7 @@ fn derive_from_seed(seed: u64) -> FerroxKeys {
 }
 
 /// Generates key material under an explicit mode -- no process env reads,
-/// so this is directly unit-testable. `deterministic: false` draws a fresh
-/// seed from the OS CSPRNG (`rand::thread_rng`) on every call. `deterministic:
-/// true` uses `seed_override` if given, else the fixed default seed `0`.
+/// so this is directly unit-testable.
 pub fn generate_with_mode(deterministic: bool, seed_override: Option<u64>) -> FerroxKeys {
     let seed = if deterministic {
         seed_override.unwrap_or(0)
@@ -82,9 +84,7 @@ pub fn generate_with_mode(deterministic: bool, seed_override: Option<u64>) -> Fe
 }
 
 /// Reads `FERROX_DETERMINISTIC` and `FERROX_SEED` from the process
-/// environment and calls `generate_with_mode` accordingly. Thin wrapper
-/// kept separate from `generate_with_mode` so unit tests never touch
-/// process-global env state (see module docs).
+/// environment and calls `generate_with_mode` accordingly.
 pub fn generate_from_env() -> FerroxKeys {
     let deterministic = env::var("FERROX_DETERMINISTIC")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -95,8 +95,7 @@ pub fn generate_from_env() -> FerroxKeys {
     generate_with_mode(deterministic, seed_override)
 }
 
-/// Renders `keys` as a `keys.rs` source file's contents: a handful of
-/// `pub const` declarations, safe to `include!()` into a consuming crate.
+/// Renders `keys` as a `keys.rs` source file's contents.
 pub fn render_keys_rs(keys: &FerroxKeys) -> String {
     let mut out = String::new();
     writeln!(out, "// @generated by ferrox-keygen. Do not edit by hand --").unwrap();
@@ -120,28 +119,37 @@ pub fn render_keys_rs(keys: &FerroxKeys) -> String {
     out
 }
 
-/// Writes `keys.rs` into `out_dir` (typically `env!("OUT_DIR")` from a
-/// consuming crate's `build.rs`).
+/// Writes `keys.rs` into `out_dir`.
 pub fn write_keys_rs(keys: &FerroxKeys, out_dir: &Path) -> io::Result<()> {
     std::fs::write(out_dir.join("keys.rs"), render_keys_rs(keys))
 }
 
-/// Convenience entry point for `build.rs`: reads mode from env
-/// (`generate_from_env`), reads `OUT_DIR` from env, writes `keys.rs`, and
-/// emits `cargo:rerun-if-env-changed` so a changed env var triggers
-/// regeneration.
+/// Convenience entry point for `build.rs`: reads mode from env, writes
+/// `keys.rs`, emits `cargo:rustc-env=FERROX_STRING_KEY_HEX=<hex>` (Phase 6
+/// addition -- see module docs), and emits `cargo:rerun-if-env-changed`
+/// so a changed env var triggers regeneration.
 ///
 /// # Errors
-/// Returns `Err` if `OUT_DIR` is not set (i.e. not actually running inside
-/// a `build.rs`) or if writing the file fails.
+/// Returns `Err` if `OUT_DIR` is not set or if writing the file fails.
 pub fn run() -> io::Result<()> {
     println!("cargo:rerun-if-env-changed=FERROX_DETERMINISTIC");
     println!("cargo:rerun-if-env-changed=FERROX_SEED");
 
-    let out_dir = env::var("OUT_DIR")
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "OUT_DIR not set -- ferrox-keygen::run() must be called from build.rs"))?;
+    let out_dir = env::var("OUT_DIR").map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "OUT_DIR not set -- ferrox-keygen::run() must be called from build.rs",
+        )
+    })?;
     let keys = generate_from_env();
-    write_keys_rs(&keys, Path::new(&out_dir))
+    write_keys_rs(&keys, Path::new(&out_dir))?;
+
+    println!(
+        "cargo:rustc-env=FERROX_STRING_KEY_HEX={}",
+        ferrox_strings::hex::encode(&keys.string_key)
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -172,10 +180,6 @@ mod tests {
 
     #[test]
     fn non_deterministic_mode_yields_different_keys_across_calls() {
-        // F1.8: "two builds from identical source must produce different
-        // constants." Probabilistic test (collision chance is
-        // astronomically small with a 64-bit seed space), standard for
-        // this kind of property.
         let a = generate_with_mode(false, None);
         let b = generate_with_mode(false, None);
         assert_ne!(a, b, "random mode must not repeat keys across calls");
@@ -202,5 +206,18 @@ mod tests {
         let contents = std::fs::read_to_string(dir.join("keys.rs")).unwrap();
         assert!(contents.contains("FERROX_BUILD_SEED: u64 = 7;"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn string_key_round_trips_through_hex_the_same_way_run_emits_it() {
+        // Mirrors exactly what run() does with the hex-encoded key, without
+        // needing a real OUT_DIR/build.rs context -- a direct sanity check
+        // that ferrox_strings::hex::encode output is何decodable back to
+        // the original 32 bytes, which is the whole point of the
+        // FERROX_STRING_KEY_HEX convention documented in the module docs.
+        let keys = generate_with_mode(true, Some(99));
+        let hex = ferrox_strings::hex::encode(&keys.string_key);
+        let decoded = ferrox_strings::hex::decode(&hex).unwrap();
+        assert_eq!(decoded, keys.string_key.to_vec());
     }
 }
