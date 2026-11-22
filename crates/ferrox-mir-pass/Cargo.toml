@@ -5,4 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Ferrox Layer 2: MIR-level control-flow obfuscation via rustc_driver. Stub: implemented in Phase 7."
+description = "Ferrox Layer 2: MIR-level control-flow obfuscation via rustc_driver. Nightly-only."
+
+[[bin]]
+name = "ferrox-mir-driver"
+path = "src/bin/ferrox_mir_driver.rs"
