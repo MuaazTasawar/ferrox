@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Ferrox CLI -- cargo subcommand orchestrating the hardening pipeline. Stub: implemented in Phase 5."
+description = "Ferrox CLI -- cargo subcommand orchestrating the hardening pipeline."
 
 [[bin]]
 name = "cargo-ferrox"
 path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+cargo_metadata.workspace = true
+thiserror.workspace = true

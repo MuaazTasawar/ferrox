@@ -49,60 +49,44 @@ is a deliberate boundary, not an oversight.
 ### Layer 1 -- String Encryption (Phases 1-3)
 
 `ferrox-strings` provides RC4-based encryption; `ferrox-macros`' `enc!`
-macro is the user-facing entry point, encrypting literals at compile time
-and decrypting lazily, once, at first runtime access. What this defends
-against: a `strings <binary>` scan, or a quick look in a hex editor,
-finding plaintext license-check messages, error strings, or other
-revealing literals. What it does **not** defend against: an attacker who
-sets a breakpoint on `EncryptedStr::get()` and reads the decrypted value
-out of memory at runtime -- that is Layer 3's job to make harder.
-
-`ferrox-keygen` (Phase 3) independently satisfies F1.8. **Interim
-caveat** (resolved at Phase 6): `enc!` still generates its own
-independent per-site key rather than consuming `ferrox-keygen`'s output;
-the two are wired together concretely in `examples/license-checker`.
+macro is the user-facing entry point. Defends against `strings <binary>`
+scans and casual hex-editor inspection; does **not** defend against a
+breakpoint on `EncryptedStr::get()` reading decrypted memory at runtime --
+that is Layer 3's job. **Interim caveat** (resolved at Phase 6): `enc!`
+still generates its own independent per-site key rather than consuming
+`ferrox-keygen`'s output.
 
 ### Layer 3 -- Runtime Anti-Tamper / Anti-Debug (Phase 4)
 
-`ferrox-runtime` provides three independent pieces, all linked directly
-into the protected binary:
+Panic hygiene (silent release-mode panic hook), a self-checksum background
+thread, and three independent anti-debug checks (`ptrace` self-trace on
+Linux, `IsDebuggerPresent` on Windows, timing-anomaly on both), all
+reporting into one shared `tamper_detected()` flag.
 
-- **Panic hygiene (F1.3):** `panic_hook::install()` replaces the default
-  panic hook with a silent one, but only in release builds
-  (`cfg(not(debug_assertions))`) -- developers still see normal panic
-  output while iterating locally.
-- **Self-checksum (F1.4, F1.5):** `checksum::start()` spawns a background
-  thread that re-hashes the process's own loaded code region every
-  2-5 seconds (randomized) and compares against a baseline computed on
-  first run. On mismatch, it calls `mark_tampered()` -- it does **not**
-  crash, print, or otherwise announce the mismatch (F1.5). **Known
-  limitation, stated plainly:** the baseline is trust-on-first-run, not a
-  true build-time-embedded hash (which requires post-link patching, not
-  yet implemented -- planned for `ferrox-cli` in Phase 5). This defeats a
-  debugger attaching mid-run and patching a check in place; it does
-  **not** defeat an attacker who statically patches the binary before it
-  ever runs. The hashed region is also a simplification: the whole loaded
-  image/first executable mapping, not a precise `.text`-only
-  section-table parse -- arguably stronger in practice (also catches
-  read-only data tampering), but worth naming as a deviation from a
-  literal "`.text` segment" reading of F1.4.
-- **Anti-debug (F1.6, F1.7):** three independent checks, each its own
-  function rather than one `is_debugged()` aggregator --
-  `anti_debug::linux::check()` (`ptrace(PTRACE_TRACEME)` self-trace, Linux
-  only), `anti_debug::windows::check()` (`IsDebuggerPresent`, Windows
-  only), and `anti_debug::timing::check()` (timing anomaly on a trivial
-  computation, both platforms). All three are meant to be called from
-  different, unrelated call sites in the *consuming* crate's own logic
-  (F1.7) -- demonstrated concretely in `examples/license-checker`
-  (Phase 6), not bundled into one call here.
+**Known limitation, now tracked across two phases:**
+The checksum baseline is **trust-on-first-run**, not a true
+build-time-embedded hash. A production-grade implementation computes the
+hash *after* final linking and patches it into the binary post-build
+(the hash of a section can't be known until the bytes exist, post-link).
+That patching step requires parsing the compiled binary's format (ELF on
+Linux, PE on Windows) to locate a placeholder -- which means a new
+dependency (e.g. the `object` crate) not yet in this workspace.
 
-What ties the above together: `tamper_detected() -> bool` reads a single
-shared flag any of the three mechanisms can set. **`ferrox-runtime`
-itself never corrupts anything** -- it has no notion of what "the
-program's output" means for an arbitrary protected crate. F1.5's actual
-silent-corruption behavior is the consuming crate's responsibility, at
-whatever call site makes sense for its own logic (again, shown concretely
-in Phase 6).
+- As of **Phase 4**: trust-on-first-run shipped as the interim; this gap
+  was first stated here.
+- As of **Phase 5**: `ferrox-cli`'s `build` command was the natural place
+  for this post-link step to live (it already orchestrates the build), but
+  it does **not** implement it -- `commands/build.rs` states this
+  explicitly in both its module docs and its own `eprintln!` output after
+  a successful build, so a user running `cargo ferrox build` is told, not
+  left to assume more than what shipped.
+- **Practical effect, stated plainly:** Ferrox v1, as built through
+  Phase 5, defeats a debugger attaching mid-run and patching a check in
+  place; it does **not** defeat an attacker who statically patches the
+  binary before it is ever executed (the baseline would simply reflect the
+  already-patched bytes). Closing this gap is not currently scheduled
+  into Phases 6-12's file list and would need an explicit scope addition
+  if required for v1.
 
 ### Layer 2 (MIR Control-Flow Obfuscation)
 
