@@ -19,7 +19,7 @@ pub fn encode(bytes: &[u8]) -> String {
 /// would surface as a confusing proc-macro ICE rather than a clean
 /// fallback.
 pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(format!("hex string has odd length ({})", s.len()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);

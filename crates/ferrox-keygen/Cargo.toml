@@ -9,3 +9,4 @@ description = "Ferrox per-build key randomization, invoked from a protected crat
 
 [dependencies]
 rand.workspace = true
+ferrox-strings = { path = "../ferrox-strings" }

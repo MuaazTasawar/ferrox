@@ -1,18 +1,19 @@
 ﻿//! `ferrox-strings` -- Layer 1 of Ferrox: compile-time string encryption.
 //!
 //! Scope for this crate (F1.1, F1.2): a symmetric cipher (`encrypt`/
-//! `decrypt`) plus a `'static`-friendly runtime wrapper (`EncryptedStr`)
-//! that `ferrox-macros`' `enc!()` will expand into (Phase 2). `enc!("x")`
-//! becomes a `static` `EncryptedStr` that decrypts itself lazily, once, on
-//! first access -- so plaintext exists in memory only after first use, and
-//! never in the binary's data section (verified in CI by NF7's `strings`
-//! check once the macro and an example binary exist).
+//! `decrypt`), a `'static`-friendly runtime wrapper (`EncryptedStr`) that
+//! `ferrox-macros`' `enc!()` expands into, and (Phase 6) a `hex` module
+//! used to pass binary key material through `cargo:rustc-env` string
+//! values between `ferrox-keygen` and `ferrox-macros`.
 //!
-//! The actual per-build key comes from `ferrox-keygen` (Phase 3). Until
-//! then, this crate is self-contained and tested against hardcoded keys.
+//! `enc!("x")` becomes a `static` `EncryptedStr` that decrypts itself
+//! lazily, once, on first access -- so plaintext exists in memory only
+//! after first use, and never in the binary's data section (verified in
+//! CI by the F1.2 `strings` check against `examples/license-checker`).
 
 pub mod decrypt;
 pub mod encrypt;
+pub mod hex;
 
 use std::sync::OnceLock;
 
@@ -42,10 +43,8 @@ impl EncryptedStr {
     /// the result for the lifetime of the program.
     ///
     /// # Panics
-    /// Panics if decryption does not yield valid UTF-8. This should only
-    /// happen if the ciphertext/key pairing is corrupted (e.g. a keygen or
-    /// macro-expansion bug) -- not a condition that is meaningful to
-    /// recover from at the call site, since callers expect `&str`.
+    /// Panics if decryption does not yield valid UTF-8 -- in practice this
+    /// should only happen if the ciphertext/key pairing is corrupted.
     pub fn get(&self) -> &str {
         self.cell.get_or_init(|| {
             decrypt::decrypt_to_string(self.ciphertext, self.key).unwrap_or_else(|_| {
@@ -70,8 +69,6 @@ mod tests {
             Box::leak(encrypt_literal("hello from ferrox", KEY).into_boxed_slice());
         let es = EncryptedStr::new(ciphertext, KEY);
         assert_eq!(es.get(), "hello from ferrox");
-        // Second call hits the cached value; still correct.
         assert_eq!(es.get(), "hello from ferrox");
     }
 }
-
