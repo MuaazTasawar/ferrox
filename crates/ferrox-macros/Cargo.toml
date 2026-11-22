@@ -16,3 +16,6 @@ quote.workspace = true
 proc-macro2.workspace = true
 rand.workspace = true
 ferrox-strings = { path = "../ferrox-strings" }
+
+[dev-dependencies]
+ferrox-runtime = { path = "../ferrox-runtime" }
