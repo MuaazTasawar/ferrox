@@ -5,7 +5,23 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Ferrox Layer 3: runtime anti-tamper and anti-debug. Stub: implemented in Phase 4."
+description = "Ferrox Layer 3: runtime anti-tamper and anti-debug, linked directly into the protected binary."
 
 [dependencies]
+# Linux: raw ptrace(2) self-trace check (F1.6, anti_debug::linux). Thin,
+# well-audited FFI bindings crate; no further transitive dependencies of
+# its own beyond the platform C library it binds (NF12).
 libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Windows: IsDebuggerPresent (F1.6, anti_debug::windows) and
+# GetModuleHandleW/GetModuleInformation for locating this process's own
+# code region to checksum (F1.4, checksum::locate::windows). Only pulled
+# in on the Windows target -- see NF12 (minimal dependency footprint).
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

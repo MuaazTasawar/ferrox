@@ -55,29 +55,54 @@ against: a `strings <binary>` scan, or a quick look in a hex editor,
 finding plaintext license-check messages, error strings, or other
 revealing literals. What it does **not** defend against: an attacker who
 sets a breakpoint on `EncryptedStr::get()` and reads the decrypted value
-out of memory at runtime -- that is Layer 3's job (anti-debug) to make
-harder, not Layer 1's. RC4 is used knowingly as a weak-but-sufficient
-cipher; see "Purpose and Legitimate Use" above.
+out of memory at runtime -- that is Layer 3's job to make harder.
 
-`ferrox-keygen` (Phase 3) independently satisfies F1.8 (same seed produces
-identical keys; random mode produces different keys per call), with an
-NF8 deterministic escape hatch via `FERROX_DETERMINISTIC`/`FERROX_SEED`.
+`ferrox-keygen` (Phase 3) independently satisfies F1.8. **Interim
+caveat** (resolved at Phase 6): `enc!` still generates its own
+independent per-site key rather than consuming `ferrox-keygen`'s output;
+the two are wired together concretely in `examples/license-checker`.
 
-**Interim caveat (narrowed as of Phase 3, resolved at Phase 6):** `enc!`
-still generates its own independent per-`enc!`-site key rather than
-consuming `ferrox-keygen`'s `FERROX_STRING_KEY`. The two are wired
-together concretely in Phase 6's `examples/license-checker` -- that is
-deliberately where this caveat closes for real, proven end-to-end, rather
-than asserted in isolation per-crate.
+### Layer 3 -- Runtime Anti-Tamper / Anti-Debug (Phase 4)
 
-**Panic hygiene (F1.3)** is part of Layer 1's requirement set but is
-implemented alongside the rest of Layer 3 in Phase 4 (same crate,
-`ferrox-runtime`, same release-build-only posture) -- detailed here once
-that phase lands.
+`ferrox-runtime` provides three independent pieces, all linked directly
+into the protected binary:
 
-### Layer 3 (Runtime Anti-Tamper / Anti-Debug)
+- **Panic hygiene (F1.3):** `panic_hook::install()` replaces the default
+  panic hook with a silent one, but only in release builds
+  (`cfg(not(debug_assertions))`) -- developers still see normal panic
+  output while iterating locally.
+- **Self-checksum (F1.4, F1.5):** `checksum::start()` spawns a background
+  thread that re-hashes the process's own loaded code region every
+  2-5 seconds (randomized) and compares against a baseline computed on
+  first run. On mismatch, it calls `mark_tampered()` -- it does **not**
+  crash, print, or otherwise announce the mismatch (F1.5). **Known
+  limitation, stated plainly:** the baseline is trust-on-first-run, not a
+  true build-time-embedded hash (which requires post-link patching, not
+  yet implemented -- planned for `ferrox-cli` in Phase 5). This defeats a
+  debugger attaching mid-run and patching a check in place; it does
+  **not** defeat an attacker who statically patches the binary before it
+  ever runs. The hashed region is also a simplification: the whole loaded
+  image/first executable mapping, not a precise `.text`-only
+  section-table parse -- arguably stronger in practice (also catches
+  read-only data tampering), but worth naming as a deviation from a
+  literal "`.text` segment" reading of F1.4.
+- **Anti-debug (F1.6, F1.7):** three independent checks, each its own
+  function rather than one `is_debugged()` aggregator --
+  `anti_debug::linux::check()` (`ptrace(PTRACE_TRACEME)` self-trace, Linux
+  only), `anti_debug::windows::check()` (`IsDebuggerPresent`, Windows
+  only), and `anti_debug::timing::check()` (timing anomaly on a trivial
+  computation, both platforms). All three are meant to be called from
+  different, unrelated call sites in the *consuming* crate's own logic
+  (F1.7) -- demonstrated concretely in `examples/license-checker`
+  (Phase 6), not bundled into one call here.
 
-Filled in after Phase 4.
+What ties the above together: `tamper_detected() -> bool` reads a single
+shared flag any of the three mechanisms can set. **`ferrox-runtime`
+itself never corrupts anything** -- it has no notion of what "the
+program's output" means for an arbitrary protected crate. F1.5's actual
+silent-corruption behavior is the consuming crate's responsibility, at
+whatever call site makes sense for its own logic (again, shown concretely
+in Phase 6).
 
 ### Layer 2 (MIR Control-Flow Obfuscation)
 

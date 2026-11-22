@@ -42,57 +42,52 @@ hardened binary
 
 ### `ferrox-strings` (Phase 1)
 
-Two layers: a pure, stateless RC4 cipher (`encrypt::rc4_apply` /
-`encrypt::encrypt_literal`, `decrypt::decrypt_bytes` /
-`decrypt::decrypt_to_string`) and a runtime-facing wrapper,
-`EncryptedStr`, built from a `'static` ciphertext slice and a `'static`
-key slice. `EncryptedStr::new` is `const fn`, so it can initialize a
-`static`; decryption happens lazily inside `OnceLock` on first `.get()`
-call and is cached for the process lifetime. RC4 is deliberately
-not cryptographically strong against a dedicated attacker -- the goal
-(per `THREAT_MODEL.md`) is keeping literals out of `strings <binary>`
-output, not providing secrecy.
+A pure, stateless RC4 cipher (`encrypt`/`decrypt`) plus a runtime-facing
+wrapper, `EncryptedStr`, built from `'static` ciphertext/key slices.
+`EncryptedStr::new` is `const fn`; decryption happens lazily inside a
+`OnceLock` on first `.get()` call and is cached for the process lifetime.
 
 ### `ferrox-macros` -- `enc!` (Phase 2)
 
-`enc!("literal")` is a `#[proc_macro]` (not `macro_rules!`, since it needs
-to run arbitrary host-side code -- RC4 encryption -- at macro-expansion
-time). It: (1) parses the input as a string literal, (2) generates a
-random 32-byte key via `rand::thread_rng()` *on the host, at compile
-time*, (3) encrypts the literal with `ferrox_strings::encrypt::encrypt_literal`,
-(4) emits both the ciphertext and key as `static` byte-array literals,
-wrapped in a `static ferrox_strings::EncryptedStr`, whose `.get()` is
-the macro's final expression.
+A `#[proc_macro]` that encrypts a string literal at macro-expansion time
+(host-side RC4), then emits a `static ferrox_strings::EncryptedStr` whose
+`.get()` is the macro's final expression.
 
 ### `ferrox-keygen` (Phase 3)
 
-A build-time-only helper, called from a protected crate's `build.rs`
-(not from `ferrox-cli` directly, and not linked into the target). Split
-into a pure core (`generate_with_mode(deterministic, seed_override)`,
-`derive_from_seed`) and a thin env-reading wrapper (`generate_from_env`,
-`run`) -- the pure core is what's unit-tested, so tests never mutate
-process-global environment variables under `cargo test`'s parallel runner.
-`run()` reads `OUT_DIR`, generates a `FerroxKeys` (seed + 32-byte string
-key + 8-byte checksum salt, all derived from one seed via a seeded
-`StdRng`), and writes `keys.rs` -- a handful of `pub const` declarations
-meant to be pulled in with `include!(concat!(env!("OUT_DIR"), "/keys.rs"))`.
+Build-time-only, called from a protected crate's `build.rs`. Pure core
+(`generate_with_mode`) is unit-tested without touching process env;
+`run()` reads `OUT_DIR` and writes `keys.rs` (seed, 32-byte string key,
+8-byte checksum salt, all derived from one seed via a seeded `StdRng`).
+`FERROX_DETERMINISTIC`/`FERROX_SEED` env vars satisfy NF8 pending a real
+CLI flag in Phase 5.
 
-Determinism (NF8) is an env-var escape hatch today
-(`FERROX_DETERMINISTIC=1`, optionally `FERROX_SEED=<u64>`) pending
-`ferrox-cli` (Phase 5) exposing it as a real `--deterministic` flag.
+### `ferrox-runtime` (Phase 4)
 
-**Integration note:** `ferrox-keygen` exists and is fully tested as of
-this phase, but `enc!` (Phase 2) still generates its own independent
-per-site key rather than consuming `keys.rs`'s `FERROX_STRING_KEY`, and
-`ferrox-runtime`'s checksum thread (Phase 4, not yet built) will be the
-first real consumer of `FERROX_CHECKSUM_SALT`. The concrete wiring of a
-crate's `build.rs` + `keys.rs` + `enc!`/runtime all together happens in
-Phase 6's `examples/license-checker` -- that is deliberately where this
-gets proven end-to-end, not asserted in isolation per-crate.
+Linked directly into the protected binary. Three independent pieces:
+
+- `panic_hook::install()` -- silent panic hook, release builds only.
+- `checksum::start()` -- background thread, 2-5s randomized interval,
+  re-hashes the process's own loaded code region (FNV-1a over a region
+  located via `/proc/self/maps` on Linux or `GetModuleHandleW` +
+  `GetModuleInformation` on Windows) and compares against a baseline
+  computed on first run (trust-on-first-run; see
+  `docs/THREAT_MODEL.md`'s Layer 3 section for the documented limitation
+  versus a true build-time-embedded hash).
+- `anti_debug::{linux, windows, timing}::check()` -- three independent
+  functions (not one aggregator, per F1.7), meant to be called from
+  scattered, unrelated sites in the consuming crate.
+
+All three report into one shared flag via `crate::mark_tampered()`, read
+back by consumers through `tamper_detected() -> bool`. `ferrox-runtime`
+itself never corrupts the protected crate's output -- that is the
+consuming crate's responsibility at whatever call site fits its own
+logic, demonstrated concretely in `examples/license-checker` (Phase 6).
+`#![deny(clippy::unwrap_used)]` at the crate root is the automated half
+of NF6's "no panics" audit.
 
 ## Deferred Per-Crate Detail
 
-- `ferrox-runtime` -- after Phase 4.
 - `ferrox-cli` -- after Phase 5.
 - `ferrox-mir-pass` -- after Phase 7.
 - `ferrox-macros` (`#[ferrox::protect]`) -- after Phase 8.
