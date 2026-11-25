@@ -1,18 +1,21 @@
 ﻿//! Control-flow flattening (Layer 2's core transformation).
 //!
-//! **Steps 7b-ii-A, 7b-ii-B, 7c (this version):** flattens `Goto` edges
-//! and `SwitchInt` terminators (as before), and now guards every
-//! flattened edge's jump into the dispatch block with an opaque
-//! predicate: `(state * state) % 4 != 2`. For any integer `state`, `x^2
-//! mod 4` is always 0 or 1, never 2 -- so this condition is always true,
-//! but to a decompiler's simple static analysis it reads as a genuine
-//! data-dependent branch with two live targets, rather than the
-//! unconditional jump it actually is. The "false" arm points at the
-//! existing unreachable-fallback block (never actually taken) rather than
-//! a dedicated decoy block, reusing scaffolding already in place.
+//! **Step 8b (this version):** flattening/opaque-predicates (steps
+//! 7b-ii-A, 7b-ii-B, 7c) now only apply to functions marked
+//! `#[ferrox_macros::protect]` -- detected by scanning the body's `Call`
+//! terminators for one whose callee's `def_path_str` ends in
+//! `__ferrox_protect_marker` (see `ferrox-runtime::__ferrox_protect_marker`
+//! and `ferrox-macros::protect_macro` for the injection side). Previously
+//! (through step 7c) every function in the crate was flattened
+//! unconditionally -- that was a deliberate Phase 7 smoke-test
+//! simplification, not the final design; this step closes that gap.
 //!
-//! `Call`, `Drop`, `Assert`, `Return`, and unwind targets remain
-//! untouched -- an ongoing, documented scope limitation.
+//! Detection uses `Operand::ty(&body.local_decls, tcx)` ->
+//! `TyKind::FnDef(def_id, _)` rather than a more specific
+//! "is this operand a constant function reference" helper method, on the
+//! theory that this lower-level pattern is less likely to have shifted
+//! between nightly releases than a more specific convenience method would
+//! be.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +24,24 @@ use rustc_middle::mir::{
     Rvalue, SourceInfo, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind,
     WithRetag,
 };
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::ty::{TyCtxt, TyKind};
+
+/// Step 8b: scans `body`'s `Call` terminators for a call to
+/// `__ferrox_protect_marker`. Returns `true` as soon as one is found.
+fn is_protected<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
+    for bb_data in body.basic_blocks.iter() {
+        if let TerminatorKind::Call { func, .. } = &bb_data.terminator().kind {
+            let ty = func.ty(&body.local_decls, tcx);
+            if let TyKind::FnDef(def_id, _) = ty.kind() {
+                let path = tcx.def_path_str(*def_id);
+                if path.ends_with("__ferrox_protect_marker") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 /// Builds a `usize` constant operand.
 fn make_usize_const_operand<'tcx>(
@@ -50,10 +70,9 @@ fn make_set_state_stmt<'tcx>(
     )
 }
 
-/// Step 7c: builds the statements and terminator for an opaque-predicate
-/// guarded jump into `real_target`, with `decoy_target` as the (never
-/// taken) false arm. Allocates three fresh locals (`sq`, `md`, `cond`) in
-/// `body` for the computation.
+/// Builds the statements and terminator for an opaque-predicate guarded
+/// jump into `real_target`, with `decoy_target` as the (never taken)
+/// false arm. Allocates three fresh locals in `body`.
 fn make_opaque_guard<'tcx>(
     tcx: TyCtxt<'tcx>,
     span: rustc_span::Span,
@@ -75,7 +94,6 @@ fn make_opaque_guard<'tcx>(
     let four = make_usize_const_operand(tcx, span, 4);
     let two = make_usize_const_operand(tcx, span, 2);
 
-    // sq = state * state
     let sq_stmt = Statement::new(
         SourceInfo::outermost(span),
         StatementKind::Assign(Box::new((
@@ -86,7 +104,6 @@ fn make_opaque_guard<'tcx>(
             ),
         ))),
     );
-    // md = sq % 4
     let md_stmt = Statement::new(
         SourceInfo::outermost(span),
         StatementKind::Assign(Box::new((
@@ -94,7 +111,6 @@ fn make_opaque_guard<'tcx>(
             Rvalue::BinaryOp(BinOp::Rem, Box::new((Operand::Copy(sq_place), four))),
         ))),
     );
-    // cond = md != 2   (always true -- x^2 mod 4 is never 2)
     let cond_stmt = Statement::new(
         SourceInfo::outermost(span),
         StatementKind::Assign(Box::new((
@@ -129,16 +145,28 @@ fn make_block<'tcx>(
     data
 }
 
-/// Steps 7b-ii-A/B + 7c: flattens `Goto`/`SwitchInt` terminators and
-/// opaque-predicate-guards every flattened jump into the dispatch block.
+/// Step 8b: only flattens functions marked `#[ferrox_macros::protect]`
+/// (detected via `is_protected`). Unmarked functions are left completely
+/// untouched, a change from the Phase 7 blanket-flattening smoke-test
+/// behavior.
 pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let debug = std::env::var("FERROX_MIR_DEBUG").as_deref() == Ok("1");
-    let num_original_blocks = body.basic_blocks.len();
 
+    if !is_protected(tcx, body) {
+        if debug {
+            eprintln!(
+                "ferrox-mir-pass: skipping {:?} (not marked #[protect])",
+                tcx.def_path_str(body.source.def_id())
+            );
+        }
+        return;
+    }
+
+    let num_original_blocks = body.basic_blocks.len();
     if num_original_blocks <= 1 {
         if debug {
             eprintln!(
-                "ferrox-mir-pass: flatten skipped for {:?} ({} block(s), nothing to flatten)",
+                "ferrox-mir-pass: flatten skipped for {:?} (protected, but only {} block(s), nothing to flatten)",
                 tcx.def_path_str(body.source.def_id()),
                 num_original_blocks
             );
@@ -148,8 +176,6 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
     let span = body.span;
 
-    // Pass 1 (read-only): find every distinct original-block target
-    // referenced by any SwitchInt arm or otherwise.
     let mut switch_targets_needing_pads: Vec<BasicBlock> = Vec::new();
     let mut switch_terminators_touched = 0u32;
     for i in 0..num_original_blocks {
@@ -179,7 +205,6 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     switch_targets_needing_pads.sort_by_key(|bb| bb.as_usize());
 
     let landing_pad_count = switch_targets_needing_pads.len();
-    // Layout: [original blocks] [landing pads] [unreachable] [dispatch]
     let landing_pad_base = num_original_blocks;
     let unreachable_bb = BasicBlock::from_usize(landing_pad_base + landing_pad_count);
     let dispatch_bb = BasicBlock::from_usize(landing_pad_base + landing_pad_count + 1);
@@ -193,7 +218,6 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let state_local = body.local_decls.push(LocalDecl::new(tcx.types.usize, span));
     let state_place = Place::from(state_local);
 
-    // Pass 2: flatten Goto edges, each guarded by an opaque predicate.
     let mut goto_edges_flattened = 0u32;
     let mut opaque_guards_inserted = 0u32;
     for i in 0..num_original_blocks {
@@ -215,7 +239,6 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         }
     }
 
-    // Pass 3: rewrite SwitchInt terminators to point at landing pads.
     for i in 0..num_original_blocks {
         let bb = BasicBlock::from_usize(i);
         let terminator_kind = body.basic_blocks[bb].terminator().kind.clone();
@@ -238,7 +261,6 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         }
     }
 
-    // Pass 4: materialize landing pad blocks, each opaque-predicate-guarded.
     for &target in &switch_targets_needing_pads {
         let value_operand = make_usize_const_operand(tcx, span, target.as_u32() as u64);
         let set_stmt = make_set_state_stmt(span, state_place, value_operand);
@@ -257,9 +279,6 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         opaque_guards_inserted += 1;
     }
 
-    // Pass 5: unreachable fallback + dispatch block (unguarded -- this IS
-    // the real dispatcher; guarding it further is unnecessary complexity
-    // for this phase).
     let pushed_unreachable = body
         .basic_blocks_mut()
         .push(make_block(span, vec![], TerminatorKind::Unreachable));
@@ -282,7 +301,7 @@ pub fn maybe_flatten<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
 
     if debug {
         eprintln!(
-            "ferrox-mir-pass: flattened {:?} -- {} original block(s), {} Goto edge(s), {} SwitchInt terminator(s) touched, {} landing pad(s), {} opaque guard(s) inserted (steps 7b-ii-A+B, 7c)",
+            "ferrox-mir-pass: flattened {:?} (protected) -- {} original block(s), {} Goto edge(s), {} SwitchInt terminator(s) touched, {} landing pad(s), {} opaque guard(s) inserted",
             tcx.def_path_str(body.source.def_id()),
             num_original_blocks,
             goto_edges_flattened,

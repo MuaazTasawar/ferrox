@@ -1,0 +1,16 @@
+﻿[package]
+name = "protect-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone package, deliberately NOT part of the main ferrox workspace
+# (it's a disposable scratch smoke-test, not shipped Ferrox code). Without
+# this empty [workspace] table, cargo auto-detects the enclosing ferrox/
+# workspace by directory nesting and refuses to build this as a separate
+# package.
+[workspace]
+
+[dependencies]
+ferrox-macros = { path = "../../crates/ferrox-macros" }
+ferrox-runtime = { path = "../../crates/ferrox-runtime" }
